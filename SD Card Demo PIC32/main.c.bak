@@ -1,0 +1,1346 @@
+/* SD Card Test for PIC32MX795 on LED Control Board main.c 
+ *
+ * 12-18-14 Compiled with MAPLABX in WORK directory.
+ * Got Atmel memory & SD card & Matrix & pots all working.
+ * 12-19-14 XBEE Rx & Tx works.
+ * 12-20-14 RS485 RX and TX works.
+ * For HOST: created fputc() for printf with TX interrupts, but this caused resets.
+ * 12-21-14 Got I2C working with accelerometer.
+ * 12-27-14 Accelerometer is reading X,Y,Z axes.
+ * 12-28-14 Convert two's complement 
+ */
+
+// #define _SUPPRESS_PLIB_WARNING
+// #include <plib.h>
+#include <xc.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include "FSIO.h"
+#include "Defs.h"
+#include "Delay.h"
+#include "AT45DB161.h"
+
+//Define a few of the registers that we will be accessing on the MMA8452
+#define OUT_X_MSB 0x01
+#define XYZ_DATA_CFG  0x0E
+#define WHO_AM_I   0x0D
+#define CTRL_REG1  0x2A
+#define ACCELEROMETER_ID 0x1D
+
+#define GSCALE 2 // Sets full-scale range to +/-2, 4, or 8g. Used to calc real g values.
+
+#define I2C_CLOCK_FREQ             5000
+
+// EEPROM Constants
+#define EEPROM_I2C_BUS              I2C3
+#define EEPROM_ADDRESS              0x1D   
+
+#define MAXPOTS 4
+#define XBEEuart UART4
+#define RS485uart UART5
+
+// Standard ASCII 5x7 font
+const unsigned char ASCIIchar[] = {
+    0x00, 0x00, 0x00, 0x00, 0x00,
+    0x3E, 0x5B, 0x4F, 0x5B, 0x3E,
+    0x3E, 0x6B, 0x4F, 0x6B, 0x3E,
+    0x1C, 0x3E, 0x7C, 0x3E, 0x1C,
+    0x18, 0x3C, 0x7E, 0x3C, 0x18,
+    0x1C, 0x57, 0x7D, 0x57, 0x1C,
+    0x1C, 0x5E, 0x7F, 0x5E, 0x1C,
+    0x00, 0x18, 0x3C, 0x18, 0x00,
+    0xFF, 0xE7, 0xC3, 0xE7, 0xFF,
+    0x00, 0x18, 0x24, 0x18, 0x00,
+    0xFF, 0xE7, 0xDB, 0xE7, 0xFF,
+    0x30, 0x48, 0x3A, 0x06, 0x0E,
+    0x26, 0x29, 0x79, 0x29, 0x26,
+    0x40, 0x7F, 0x05, 0x05, 0x07,
+    0x40, 0x7F, 0x05, 0x25, 0x3F,
+    0x5A, 0x3C, 0xE7, 0x3C, 0x5A,
+    0x7F, 0x3E, 0x1C, 0x1C, 0x08,
+    0x08, 0x1C, 0x1C, 0x3E, 0x7F,
+    0x14, 0x22, 0x7F, 0x22, 0x14,
+    0x5F, 0x5F, 0x00, 0x5F, 0x5F,
+    0x06, 0x09, 0x7F, 0x01, 0x7F,
+    0x00, 0x66, 0x89, 0x95, 0x6A,
+    0x60, 0x60, 0x60, 0x60, 0x60,
+    0x94, 0xA2, 0xFF, 0xA2, 0x94,
+    0x08, 0x04, 0x7E, 0x04, 0x08,
+    0x10, 0x20, 0x7E, 0x20, 0x10,
+    0x08, 0x08, 0x2A, 0x1C, 0x08,
+    0x08, 0x1C, 0x2A, 0x08, 0x08,
+    0x1E, 0x10, 0x10, 0x10, 0x10,
+    0x0C, 0x1E, 0x0C, 0x1E, 0x0C,
+    0x30, 0x38, 0x3E, 0x38, 0x30,
+    0x06, 0x0E, 0x3E, 0x0E, 0x06,
+    0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x5F, 0x00, 0x00,
+    0x00, 0x07, 0x00, 0x07, 0x00,
+    0x14, 0x7F, 0x14, 0x7F, 0x14,
+    0x24, 0x2A, 0x7F, 0x2A, 0x12,
+    0x23, 0x13, 0x08, 0x64, 0x62,
+    0x36, 0x49, 0x56, 0x20, 0x50,
+    0x00, 0x08, 0x07, 0x03, 0x00,
+    0x00, 0x1C, 0x22, 0x41, 0x00,
+    0x00, 0x41, 0x22, 0x1C, 0x00,
+    0x2A, 0x1C, 0x7F, 0x1C, 0x2A,
+    0x08, 0x08, 0x3E, 0x08, 0x08,
+    0x00, 0x80, 0x70, 0x30, 0x00,
+    0x08, 0x08, 0x08, 0x08, 0x08,
+    0x00, 0x00, 0x60, 0x60, 0x00,
+    0x20, 0x10, 0x08, 0x04, 0x02,
+    0x3E, 0x51, 0x49, 0x45, 0x3E,
+    0x00, 0x42, 0x7F, 0x40, 0x00,
+    0x72, 0x49, 0x49, 0x49, 0x46,
+    0x21, 0x41, 0x49, 0x4D, 0x33,
+    0x18, 0x14, 0x12, 0x7F, 0x10,
+    0x27, 0x45, 0x45, 0x45, 0x39,
+    0x3C, 0x4A, 0x49, 0x49, 0x31,
+    0x41, 0x21, 0x11, 0x09, 0x07,
+    0x36, 0x49, 0x49, 0x49, 0x36,
+    0x46, 0x49, 0x49, 0x29, 0x1E,
+    0x00, 0x00, 0x14, 0x00, 0x00,
+    0x00, 0x40, 0x34, 0x00, 0x00,
+    0x00, 0x08, 0x14, 0x22, 0x41,
+    0x14, 0x14, 0x14, 0x14, 0x14,
+    0x00, 0x41, 0x22, 0x14, 0x08,
+    0x02, 0x01, 0x59, 0x09, 0x06,
+    0x3E, 0x41, 0x5D, 0x59, 0x4E,
+    0x7C, 0x12, 0x11, 0x12, 0x7C, // A
+    0x7F, 0x49, 0x49, 0x49, 0x36,
+    0x3E, 0x41, 0x41, 0x41, 0x22,
+    0x7F, 0x41, 0x41, 0x41, 0x3E,
+    0x7F, 0x49, 0x49, 0x49, 0x41,
+    0x7F, 0x09, 0x09, 0x09, 0x01,
+    0x3E, 0x41, 0x41, 0x51, 0x73,
+    0x7F, 0x08, 0x08, 0x08, 0x7F,
+    0x00, 0x41, 0x7F, 0x41, 0x00,
+    0x20, 0x40, 0x41, 0x3F, 0x01,
+    0x7F, 0x08, 0x14, 0x22, 0x41,
+    0x7F, 0x40, 0x40, 0x40, 0x40,
+    0x7F, 0x02, 0x1C, 0x02, 0x7F,
+    0x7F, 0x04, 0x08, 0x10, 0x7F,
+    0x3E, 0x41, 0x41, 0x41, 0x3E,
+    0x7F, 0x09, 0x09, 0x09, 0x06,
+    0x3E, 0x41, 0x51, 0x21, 0x5E,
+    0x7F, 0x09, 0x19, 0x29, 0x46,
+    0x26, 0x49, 0x49, 0x49, 0x32,
+    0x03, 0x01, 0x7F, 0x01, 0x03,
+    0x3F, 0x40, 0x40, 0x40, 0x3F,
+    0x1F, 0x20, 0x40, 0x20, 0x1F,
+    0x3F, 0x40, 0x38, 0x40, 0x3F,
+    0x63, 0x14, 0x08, 0x14, 0x63,
+    0x03, 0x04, 0x78, 0x04, 0x03,
+    0x61, 0x59, 0x49, 0x4D, 0x43,
+    0x00, 0x7F, 0x41, 0x41, 0x41,
+    0x02, 0x04, 0x08, 0x10, 0x20,
+    0x00, 0x41, 0x41, 0x41, 0x7F,
+    0x04, 0x02, 0x01, 0x02, 0x04,
+    0x40, 0x40, 0x40, 0x40, 0x40,
+    0x00, 0x03, 0x07, 0x08, 0x00,
+    0x20, 0x54, 0x54, 0x78, 0x40,
+    0x7F, 0x28, 0x44, 0x44, 0x38,
+    0x38, 0x44, 0x44, 0x44, 0x28,
+    0x38, 0x44, 0x44, 0x28, 0x7F,
+    0x38, 0x54, 0x54, 0x54, 0x18,
+    0x00, 0x08, 0x7E, 0x09, 0x02,
+    0x18, 0xA4, 0xA4, 0x9C, 0x78,
+    0x7F, 0x08, 0x04, 0x04, 0x78,
+    0x00, 0x44, 0x7D, 0x40, 0x00,
+    0x20, 0x40, 0x40, 0x3D, 0x00,
+    0x7F, 0x10, 0x28, 0x44, 0x00,
+    0x00, 0x41, 0x7F, 0x40, 0x00,
+    0x7C, 0x04, 0x78, 0x04, 0x78,
+    0x7C, 0x08, 0x04, 0x04, 0x78,
+    0x38, 0x44, 0x44, 0x44, 0x38,
+    0xFC, 0x18, 0x24, 0x24, 0x18,
+    0x18, 0x24, 0x24, 0x18, 0xFC,
+    0x7C, 0x08, 0x04, 0x04, 0x08,
+    0x48, 0x54, 0x54, 0x54, 0x24,
+    0x04, 0x04, 0x3F, 0x44, 0x24,
+    0x3C, 0x40, 0x40, 0x20, 0x7C,
+    0x1C, 0x20, 0x40, 0x20, 0x1C,
+    0x3C, 0x40, 0x30, 0x40, 0x3C,
+    0x44, 0x28, 0x10, 0x28, 0x44,
+    0x4C, 0x90, 0x90, 0x90, 0x7C,
+    0x44, 0x64, 0x54, 0x4C, 0x44,
+    0x00, 0x08, 0x36, 0x41, 0x00,
+    0x00, 0x00, 0x77, 0x00, 0x00,
+    0x00, 0x41, 0x36, 0x08, 0x00,
+    0x02, 0x01, 0x02, 0x04, 0x02,
+    0x3C, 0x26, 0x23, 0x26, 0x3C
+};
+
+#define MAXRANDOM (RAND_MAX+1)
+#define true	TRUE
+#define false 	FALSE
+
+#define RS485_CTRL PORTGbits.RG0
+
+// Pin defs for UBW32:
+#define CLKOUT  0x0010  // PORTDbits.RD4
+#define OE_ENB  0xFFDF  // PORTDbits.RD5
+#define LATCH   0x0040  // PORTDbits.RD6
+#define OEpin   PORTDbits.RD5
+
+#define TEST_OUT PORTBbits.RB0
+#define TRIG_OUT PORTBbits.RB1
+
+#define RIGHT 0
+#define LEFT  1
+#define UP    2
+#define DOWN  3
+#define UPRIGHT 4
+#define UPLEFT 5
+#define DOWNRIGHT 6
+#define DOWNLEFT 7
+
+unsigned short RS485timer = 0;
+
+#define PWMSTEPS 31
+const unsigned char updatePWM[PWMSTEPS] = {1, 1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+
+
+#define StoreXBEE(ch){if(XBEEindex<MAXBUFFER-2)XBEERxBuffer[XBEEindex++]=ch;if(ch=='\r'){XBEEindex=0;XBEEfull = TRUE;}}
+unsigned char XBEERxBuffer[MAXBUFFER];
+unsigned char XBEETxBuffer[MAXBUFFER] = "Testing XBEE transmitter, here goes nothing\r";
+unsigned char XBEEfull = FALSE;
+unsigned char XBEEbusy = FALSE;
+unsigned short XBEEindex = 0;
+
+#define StoreRS485(ch){if(RS485index<MAXBUFFER-2)RS485RxBuffer[RS485index++]=ch;if(ch=='\r'){RS485index=0;RS485full = TRUE;}}
+unsigned char RS485TxBuffer[MAXBUFFER] = "#7: The way I see it Barry, this should be a very dynamite show.\r";
+unsigned char RS485RxBuffer[MAXBUFFER];
+unsigned char RS485full = FALSE;
+unsigned char RS485busy = FALSE;
+unsigned short RS485index = 0;
+
+#define StoreHOST(ch){if(HOSTindex<MAXBUFFER-2)HOSTRxBuffer[HOSTindex++]=ch;if(ch=='\r'){HOSTindex=0;HOSTfull = TRUE;}}
+unsigned char HOSTTxBuffer[MAXBUFFER];
+unsigned char HOSTRxBuffer[MAXBUFFER];
+unsigned char HOSTfull = FALSE;
+unsigned char HOSTbusy = FALSE;
+unsigned short HOSTindex = 0;
+
+
+unsigned long arrPORTDdata[MAXCOL];
+unsigned long matrix[MAXROW][MAXCOL];
+
+#define NUMPOTS 4
+unsigned char arrADdata[NUMPOTS];
+
+
+#define MAGENTA 0x8000A0
+#define PURPLE 0xF00020
+#define CYAN 0x405000
+#define LIME 0x00A060
+#define YELLOW 0x008080
+#define ORANGE 0x0040F0
+#define RED 0x0000F0
+#define GREEN 0x00F000
+#define BLUE 0xF00000
+#define PINK 0x102090
+#define LAVENDER 0x602040
+#define BLACK 0x000000
+#define TURQUOISE 0x208000
+#define WHITE 0x707070
+#define GRAY 0x304030
+#define DARKGRAY 0x101010
+
+#define MAXCOLOR 12
+
+const unsigned long colorWheel[MAXCOLOR] = {MAGENTA, PURPLE, CYAN, LIME, YELLOW, ORANGE, RED, GREEN, BLUE, PINK, LAVENDER, TURQUOISE}; // , GRAY, DARKGRAY, BLACK};
+
+unsigned char initMMA8452(void);
+unsigned char setRegister(unsigned char deviceID, unsigned char deviceREGISTER);
+unsigned char sendREADcommand(unsigned char deviceID);
+// unsigned char readRegisters(unsigned char numRegisters, unsigned char *registerPtr);
+unsigned char readRegisters(unsigned char deviceID, unsigned char deviceREGISTER, unsigned char numRegisters, unsigned char *registerPtr);
+unsigned char writeByteToRegister(unsigned char deviceID, unsigned char deviceREGISTER, unsigned char dataByte);
+short convertValue(unsigned char MSBbyte, unsigned char LSBbyte);
+
+void colorTest(void);
+void wanderer(void);
+void Kaleidoscope(short leftBorderOffset, short keepout, short bottomOffset);
+void StarMaker(void);
+void displayASCII(unsigned char c, short rowOffset, short columnOffset, long charColor, long backColor);
+void initMatrix(void);
+void ConfigAd(void);
+void writeDalesStudio(void);
+extern void writeMatrix(void);
+extern void updatePORTDData(unsigned short line, unsigned char PWMbit);
+void SendXBEEpacket(void);
+void SendRS485packet(void);
+
+unsigned char transmitBuffer[MAXBUFFER];
+unsigned char receiveBuffer[MAXBUFFER];
+
+#if defined (__PIC32MX__)
+#pragma config FPLLMUL  = MUL_20        // PLL Multiplier
+#pragma config FPLLIDIV = DIV_2         // PLL Input Divider
+#pragma config FPLLODIV = DIV_1         // PLL Output Divider
+#pragma config FPBDIV   = DIV_1         // Peripheral Clock divisor
+#pragma config FWDTEN   = OFF           // Watchdog Timer
+#pragma config WDTPS    = PS1           // Watchdog Timer Postscale
+#pragma config FCKSM    = CSDCMD        // Clock Switching & Fail Safe Clock Monitor
+#pragma config OSCIOFNC = OFF           // CLKO Enable
+#pragma config POSCMOD  = HS            // Primary Oscillator
+#pragma config IESO     = OFF           // Internal/External Switch-over
+#pragma config FSOSCEN  = OFF           // Secondary Oscillator Enable (KLO was off)
+#pragma config FNOSC    = PRIPLL        // Oscillator Selection
+#pragma config CP       = OFF           // Code Protect
+#pragma config BWP      = OFF           // Boot Flash Write Protect
+#pragma config PWP      = OFF           // Program Flash Write Protect
+#pragma config ICESEL   = ICS_PGx2      // ICE/ICD Comm Channel Select
+#pragma config DEBUG    = ON            // Background Debugger Enable
+#endif
+
+#define HOSTuart UART2
+
+void initMatrix(void) {
+    unsigned short i, j;
+
+    for (i = 0; i < MAXROW; i++) {
+        for (j = 0; j < MAXCOL; j++) {
+            matrix[i][j] = BLACK;
+        }
+    }
+}
+
+/*******************************************************************************
+  Function:
+    BOOL StartTransfer( BOOL restart )
+
+  Summary:
+    Starts (or restarts) a transfer to/from the EEPROM.
+
+  Description:
+    This routine starts (or restarts) a transfer to/from the EEPROM, waiting (in
+    a blocking loop) until the start (or re-start) condition has completed.
+
+  Precondition:
+    The I2C module must have been initialized.
+
+  Parameters:
+    restart - If FALSE, send a "Start" condition
+            - If TRUE, send a "Restart" condition
+
+  Returns:
+    TRUE    - If successful
+    FALSE   - If a collision occured during Start signaling
+
+  Example:
+    <code>
+    StartTransfer(FALSE);
+    </code>
+
+  Remarks:
+    This is a blocking routine that waits for the bus to be idle and the Start
+    (or Restart) signal to complete.
+ *****************************************************************************/
+
+BOOL StartTransfer(BOOL restart) {
+    I2C_STATUS status;
+
+    // Send the Start (or Restart) signal
+    if (restart) {
+        I2CRepeatStart(EEPROM_I2C_BUS);
+    } else {
+        // Wait for the bus to be idle, then start the transfer
+        while (!I2CBusIsIdle(EEPROM_I2C_BUS));
+
+        if (I2CStart(EEPROM_I2C_BUS) != I2C_SUCCESS) {
+            DBPRINTF("Error: Bus collision during transfer Start\n");
+            return FALSE;
+        }
+    }
+
+    // Wait for the signal to complete
+    do {
+        status = I2CGetStatus(EEPROM_I2C_BUS);
+
+    } while (!(status & I2C_START));
+
+    return TRUE;
+}
+
+/*******************************************************************************
+  Function:
+    BOOL TransmitOneByte( UINT8 data )
+
+  Summary:
+    This transmits one byte to the EEPROM.
+
+  Description:
+    This transmits one byte to the EEPROM, and reports errors for any bus
+    collisions.
+
+  Precondition:
+    The transfer must have been previously started.
+
+  Parameters:
+    data    - Data byte to transmit
+
+  Returns:
+    TRUE    - Data was sent successfully
+    FALSE   - A bus collision occured
+
+  Example:
+    <code>
+    TransmitOneByte(0xAA);
+    </code>
+
+  Remarks:
+    This is a blocking routine that waits for the transmission to complete.
+ *****************************************************************************/
+
+BOOL TransmitOneByte(UINT8 data) {
+    // Wait for the transmitter to be ready    
+    while (!I2CTransmitterIsReady(EEPROM_I2C_BUS));
+
+    // Transmit the byte
+    if (I2CSendByte(EEPROM_I2C_BUS, data) == I2C_MASTER_BUS_COLLISION) {
+        DBPRINTF("Error: I2C Master Bus Collision\n");
+        return FALSE;
+    }
+
+    // Wait for the transmission to finish
+    while (!I2CTransmissionHasCompleted(EEPROM_I2C_BUS));
+
+    return TRUE;
+}
+
+/*******************************************************************************
+  Function:
+    void StopTransfer( void )
+
+  Summary:
+    Stops a transfer to/from the EEPROM.
+
+  Description:
+    This routine Stops a transfer to/from the EEPROM, waiting (in a
+    blocking loop) until the Stop condition has completed.
+
+  Precondition:
+    The I2C module must have been initialized & a transfer started.
+
+  Parameters:
+    None.
+
+  Returns:
+    None.
+
+  Example:
+    <code>
+    StopTransfer();
+    </code>
+
+  Remarks:
+    This is a blocking routine that waits for the Stop signal to complete.
+ *****************************************************************************/
+
+void StopTransfer(void) {
+    I2C_STATUS status;
+
+    // Send the Stop signal
+    I2CStop(EEPROM_I2C_BUS);
+
+    // Wait for the signal to complete
+    do {
+        status = I2CGetStatus(EEPROM_I2C_BUS);
+
+    } while (!(status & I2C_STOP));
+}
+
+int main(void) {
+    unsigned char deviceID, deviceREGISTER, readFlag;
+    short speedCount = 100;
+    short speed = 10;
+    FSFILE * pointer;
+    short length, numBytes;
+    char filename[] = "Dewdrop.txt";
+    strcpy(transmitBuffer, "Back in the old country");
+    length = strlen(transmitBuffer);
+
+    unsigned char i2cData[10];
+    I2C_7_BIT_ADDRESS SlaveAddress;
+    short Index;
+    short DataSz;
+    unsigned long actualClock;
+    unsigned char Acknowledged;
+    unsigned char Success = TRUE;
+    unsigned char i2cbyte;
+
+
+    SYSTEMConfigPerformance(GetSystemClock());
+    // mOSCSetPBDIV(OSC_PB_DIV_2);
+    // Turn off JTAG so we get the pins back
+    mJTAGPortEnable(false);
+
+    PORTD = 0x0000; // Set matrix output enable high. All other outputs low.
+    OEpin = 1;
+    PORTSetPinsDigitalOut(IOPORT_D, BIT_0 | BIT_1 | BIT_2 | BIT_3 | BIT_4 | BIT_5 | BIT_6 | BIT_7 | BIT_8 | BIT_9 | BIT_10 | BIT_11 | BIT_12);
+
+    DelayMs(200);
+
+    initMatrix();
+
+#define TIMEOUT 1600
+    // Configure Timer 1 using internal clock, 1:1 prescale, Postscale = 1600 for interrupts every 20 uS
+    // This yields a refresh rate of 200 hz for entire display
+    // 20 us x 8 lines x 32
+
+    // Set up the timer interrupt with a priority of 2
+    ConfigIntTimer1(T1_INT_ON | T1_INT_PRIOR_2);
+    OpenTimer1(T1_OFF | T1_SOURCE_INT | T1_PS_1_1, TIMEOUT);
+
+    PORTSetPinsDigitalOut(IOPORT_B, BIT_0 | BIT_1);
+    TEST_OUT = 0;
+    TRIG_OUT = 0;
+
+    PORTSetBits(IOPORT_E, BIT_0 | BIT_1 | BIT_2 | BIT_3);
+    PORTSetPinsDigitalIn(IOPORT_E, BIT_9);
+
+    // Set up Port C outputs:
+    PORTSetPinsDigitalOut(IOPORT_C, BIT_3 | BIT_4);
+    ATMEL_CS = 1;
+    SD_CS = 1;
+
+    // Set up Port G outputs:
+    PORTSetPinsDigitalOut(IOPORT_G, BIT_0);
+    RS485_CTRL = 0;
+
+    // ConfigINT2(EXT_INT_PRI_2 | RISING_EDGE_INT | EXT_INT_ENABLE);
+
+    XBEEbusy = TRUE;
+
+    /*
+    // Set up XBEE at 57600 baud
+    UARTConfigure(XBEEuart, UART_ENABLE_HIGH_SPEED | UART_ENABLE_PINS_TX_RX_ONLY);
+    UARTSetFifoMode(XBEEuart, UART_INTERRUPT_ON_TX_DONE | UART_INTERRUPT_ON_RX_NOT_EMPTY);
+    UARTSetLineControl(XBEEuart, UART_DATA_SIZE_8_BITS | UART_PARITY_NONE | UART_STOP_BITS_1);
+    UARTSetDataRate(XBEEuart, GetSystemClock(), 57600);
+    UARTEnable(XBEEuart, UART_ENABLE_FLAGS(UART_PERIPHERAL | UART_RX | UART_TX));
+
+    // Configure XBEE Interrupts
+    INTEnable(INT_SOURCE_UART_TX(XBEEuart), INT_ENABLED);
+    INTEnable(INT_SOURCE_UART_RX(XBEEuart), INT_ENABLED);
+    INTSetVectorPriority(INT_VECTOR_UART(XBEEuart), INT_PRIORITY_LEVEL_2);
+    INTSetVectorSubPriority(INT_VECTOR_UART(XBEEuart), INT_SUB_PRIORITY_LEVEL_0);
+     */
+
+    // Set up main UART
+    UARTConfigure(HOSTuart, UART_ENABLE_HIGH_SPEED | UART_ENABLE_PINS_TX_RX_ONLY); // $$$$
+    UARTSetFifoMode(HOSTuart, UART_INTERRUPT_ON_TX_DONE | UART_INTERRUPT_ON_RX_NOT_EMPTY);
+    UARTSetLineControl(HOSTuart, UART_DATA_SIZE_8_BITS | UART_PARITY_NONE | UART_STOP_BITS_1);
+    UARTSetDataRate(HOSTuart, GetSystemClock(), 57600);
+    UARTEnable(HOSTuart, UART_ENABLE_FLAGS(UART_PERIPHERAL | UART_RX | UART_TX));
+
+    // Configure UART #2 Interrupts
+    INTEnable(INT_U2TX, INT_DISABLED);
+    INTEnable(INT_SOURCE_UART_RX(HOSTuart), INT_ENABLED);
+    INTSetVectorPriority(INT_VECTOR_UART(HOSTuart), INT_PRIORITY_LEVEL_2);
+    INTSetVectorSubPriority(INT_VECTOR_UART(HOSTuart), INT_SUB_PRIORITY_LEVEL_0);
+
+    //Initialize the RTCC
+    //RtccInit();
+    //while(RtccGetClkStat()!=RTCC_CLK_ON);// wait for the SOSC to be actually running and RTCC to have its clock source could wait here at most 32ms
+    //RtccOpen(0x10073000, 0x07011602, 0);
+
+    /*
+    // Set up RS485 UART
+    UARTConfigure(RS485uart, UART_ENABLE_HIGH_SPEED | UART_ENABLE_PINS_TX_RX_ONLY); // $$$$
+    UARTSetFifoMode(RS485uart, UART_INTERRUPT_ON_TX_DONE | UART_INTERRUPT_ON_RX_NOT_EMPTY);
+    UARTSetLineControl(RS485uart, UART_DATA_SIZE_8_BITS | UART_PARITY_NONE | UART_STOP_BITS_1);
+    UARTSetDataRate(RS485uart, GetSystemClock(), 57600);
+    UARTEnable(RS485uart, UART_ENABLE_FLAGS(UART_PERIPHERAL | UART_RX | UART_TX));
+
+    // Configure RS485 Interrupts
+    INTEnable(INT_SOURCE_UART_TX(RS485uart), INT_DISABLED);
+    INTEnable(INT_SOURCE_UART_RX(RS485uart), INT_ENABLED);
+    INTSetVectorPriority(INT_VECTOR_UART(RS485uart), INT_PRIORITY_LEVEL_2);
+    INTSetVectorSubPriority(INT_VECTOR_UART(RS485uart), INT_SUB_PRIORITY_LEVEL_0);
+
+    // Set up AD converters
+    ConfigAd();
+
+    OpenTimer1(T1_ON | T1_SOURCE_INT | T1_PS_1_1, TIMEOUT);
+        // Turn on the interrupts
+    INTEnableSystemMultiVectoredInt();
+     */
+
+    //   #define GetSystemClock()           (SYS_FREQ)
+    //#define GetPeripheralClock()       (SYS_FREQ/1)
+    //#define GetInstructionClock()      (SYS_FREQ)
+
+
+    I2CSetFrequency(EEPROM_I2C_BUS, GetPeripheralClock(), I2C_CLOCK_FREQ);
+    // Enable the I2C bus
+    I2CEnable(EEPROM_I2C_BUS, TRUE);
+
+    DelayMs(100);
+    I2CStop(EEPROM_I2C_BUS);
+    DelayMs(100);
+    initMMA8452();
+
+    unsigned short startCounter = 0;
+    while (1) {
+        DelayMs(100);
+
+        unsigned char i, accelData[16];
+        for (i = 0; i < 16; i++)accelData[i] = 0;
+#define NUMBYTES 6
+        printf("\r>#%d: ", startCounter++, NUMBYTES);
+        Success = readRegisters(ACCELEROMETER_ID, 0x01, NUMBYTES, accelData);
+        short X, Y, Z;
+        X = convertValue(accelData[0], accelData[1]);
+        Y = convertValue(accelData[2], accelData[3]);
+        Z = convertValue(accelData[4], accelData[5]);
+
+
+        if (Success == 0) printf("READ error");
+        else printf("X: %d, Y: %d, Z: %d", X, Y, Z);
+    }
+    /*else {
+
+        unsigned char i;
+        for (i = 0; i < NUMBYTES; i++) {
+            printf("%X, ", accelData[i]);
+        }
+    }*/
+
+
+    /*
+    printf("\r\r\rWITH MATRIX...Interrupts enabled MAPLABX in Work directory. Detecting SD card:"); // $$$$
+    while (!MDD_MediaDetect()); // Wait for PORTFbits.RF0 to go low
+    printf("\rSD card detected. Initializing...");
+    while (!FSInit());
+
+    printf("\rSD card initialized. Opening file to write...");
+    pointer = FSfopen((const char *) filename, "w");
+    printf("\rWriting %d bytes", length);
+    numBytes = FSfwrite(transmitBuffer, length, 1, pointer);
+    printf("\r%d units written. Closing file", numBytes);
+    if (FSfclose(pointer)) while (1);
+
+    printf("\rOpening file to read...", numBytes);
+    pointer = FSfopen((const char *) filename, "r");
+    printf("\rReading...");
+    numBytes = FSfread(receiveBuffer, length, 1, pointer);
+    printf("\r%d units read. Closing file...", numBytes);
+    // if (FSfeof (pointer))while(1);
+    if (FSfclose(pointer)) while (1);
+    printf("\rTest file: %s", receiveBuffer);
+
+
+
+    unsigned short page = 222;
+    unsigned char AtmelTestDataIn[ATMEL_PAGESIZE] = "And now for the first time ever on our stage...";
+    unsigned char AtmelTestDataOut[ATMEL_PAGESIZE];
+
+    printf("\r\r#1: Initialize Atmel on SPI #2");
+    initAtmelSPI();
+
+    printf("\rPolling Atmel status...");
+    if (!AtmelBusy(0)) printf("\rBusy");
+    else printf("\rNot Busy");
+
+    printf("\rATMEL TEST: Writing to buffer");
+    WriteAtmelPage(AtmelTestDataIn); // Copy data array back to Atmel buffer
+    printf("\rErasing page");
+    ErasePage(page); // Now erase page in Atmel
+    printf("\rPrograming page");
+    ProgramPage(page); // Write new buffer to memory.
+    DelayMs(50);
+    printf("\rTransferring page");
+    TransferPage(page); // Move memory to buffer in Atmel
+    printf("\rReading page");
+    ReadAtmelPage(AtmelTestDataOut); // Copy Atmel buffer to array   
+    printf("\rData out: %s", AtmelTestDataOut);
+    printf("\rDONE");
+
+    printf("\rPOTS: %d, %d, %d, %d", arrADdata[0], arrADdata[1], arrADdata[2], arrADdata[3]);
+
+     */
+
+    writeDalesStudio();
+    speed = 5;
+    speedCount = 0;
+    while (1) {
+        DelayMs(speed);
+        if (speedCount)
+            speedCount--;
+        if (!speedCount) {
+            speed = (unsigned char) (rand() / (MAXRANDOM / 20)) + 5;
+            // printf("\rSpeed: %d", speed);
+            speedCount = 10;
+        }
+        Kaleidoscope(0, 20, 2);
+
+        if (XBEEfull) {
+            SendXBEEpacket();
+        }
+
+        if (RS485full) {
+            SendRS485packet();
+        }
+
+
+        /*
+        DelayMs(100);
+        unsigned char i;
+        for(i=0; i<NUMPOTS; i++){
+            OpenTimer1(T1_OFF | T1_SOURCE_INT | T1_PS_1_1, TIMEOUT);  // was T1_PS_1_1
+            printf ("\r#1: %d, 21: %d, #3: %d, #4: %d", arrADdata[0], arrADdata[1], arrADdata[2], arrADdata[3]);
+            OpenTimer1(T1_ON | T1_SOURCE_INT | T1_PS_1_1, TIMEOUT);  // was T1_PS_1_1
+        }
+         */
+
+    }
+    return (0);
+
+}
+
+void displayASCII(unsigned char c, short rowOffset, short columnOffset, long charColor, long backColor) {
+    unsigned char row, column, verticalBits, mask;
+    unsigned short ch;
+
+    ch = (unsigned short) c;
+    ch = ch * 5;
+    for (column = 0; column < 6; column++) {
+        mask = 0x01;
+        verticalBits = ASCIIchar[ch + column];
+        for (row = 0; row < 7; row++) {
+            if (mask & verticalBits && column < 5) matrix[row + rowOffset][column + columnOffset] = charColor;
+            else matrix[row + rowOffset][column + columnOffset] = backColor;
+            mask = mask << 1;
+        }
+    }
+
+}
+
+void __ISR(_EXTERNAL_2_VECTOR, ipl2) INT2Interrupt() {
+    mINT2ClearIntFlag();
+}
+
+void writeDalesStudio(void) {
+    unsigned char DaleText[] = "Dale's Studio";
+    short numChars, i;
+    unsigned char ch;
+    short rowOffset, columnOffset;
+    long charColor = ORANGE, backColor = BLACK;
+    unsigned char colorIndex;
+
+    colorIndex = rand() / (MAXRANDOM / MAXCOLOR);
+    if (colorIndex >= MAXCOLOR)
+        charColor = ORANGE;
+    else charColor = colorWheel[colorIndex];
+
+    numChars = sizeof (DaleText);
+    rowOffset = 4;
+    columnOffset = 26;
+    for (i = 0; i < numChars; i++) {
+        ch = DaleText[i];
+        displayASCII(ch, rowOffset, columnOffset, charColor, backColor);
+        columnOffset = columnOffset + 6;
+    }
+}
+
+void Kaleidoscope(short leftBorderOffset, short keepout, short bottomOffset) {
+    static unsigned long color = BLUE;
+    static unsigned char colorIndex = 1;
+    static unsigned short colorCount = 24;
+    static short i = MAXROW / 2;
+    static short j = 0;
+    static unsigned char direction = UPRIGHT;
+    static unsigned short directionCount = 8;
+    static unsigned short blackCounter = 1000;
+    static unsigned char blackFlag = FALSE;
+
+    if (!j) j = leftBorderOffset;
+
+    if (blackCounter)
+        blackCounter--;
+    if (!blackCounter) {
+        blackCounter = rand() / (MAXRANDOM / 500);
+        if (blackFlag) {
+            blackFlag = FALSE;
+            initMatrix();
+            writeDalesStudio();
+        } else blackFlag = TRUE;
+    }
+    matrix[i][j] = color;
+    matrix[MAXROW - i - 1][j] = color;
+    matrix[i][MAXCOL - j - 1 + leftBorderOffset] = color;
+    matrix[MAXROW - i - 1][MAXCOL - j - 1 + leftBorderOffset] = color;
+
+    // updatePORTDregisters();
+
+    if (colorCount)
+        colorCount--;
+    if (!colorCount) {
+        colorCount = rand() / (MAXRANDOM / 8);
+        colorIndex = rand() / (MAXRANDOM / MAXCOLOR);
+        if (colorIndex >= MAXCOLOR)
+            colorIndex = 1;
+        color = colorWheel[colorIndex];
+    }
+
+    if (directionCount)
+        directionCount--;
+    if (!directionCount) {
+        directionCount = rand() / (MAXRANDOM / 32);
+        direction = rand() / (MAXRANDOM / 8);
+        if (direction > 7)direction = 0;
+    }
+
+    if (direction == UP) {
+        i--;
+        if (i <= 0) {
+            i = 0;
+            direction = RIGHT;
+        }
+    } else if (direction == DOWN) {
+        i++;
+        if (j > leftBorderOffset) {
+            if (i >= bottomOffset) {
+                i = bottomOffset;
+                direction = LEFT;
+            }
+        }
+        if (i >= (MAXROW / 2)) {
+            i = (MAXROW / 2) - 1;
+            direction = UP;
+        }
+    } else if (direction == RIGHT) {
+        j++;
+        if (j >= keepout) {
+            if (i > bottomOffset)
+                i = bottomOffset;
+        }
+        if (j >= ((MAXCOL / 2) - 1 + leftBorderOffset)) {
+            j = (MAXCOL / 2) - 1 + leftBorderOffset;
+            direction = LEFT;
+        }
+    } else if (direction == LEFT) {
+        j--;
+        if (j < leftBorderOffset) {
+            j = leftBorderOffset;
+            direction = RIGHT;
+        }
+    } else if (direction == UPRIGHT) {
+        i--;
+        j++;
+        if (j >= keepout) {
+            if (i > bottomOffset)
+                i = bottomOffset;
+        }
+        if (i <= 0) {
+            i = 0;
+            direction = DOWNLEFT;
+        }
+        if (j >= ((MAXCOL / 2) - 1 + leftBorderOffset)) {
+            j = (MAXCOL / 2) - 1 + leftBorderOffset;
+            direction = DOWNLEFT;
+        }
+    } else if (direction == UPLEFT) {
+        i--;
+        j--;
+        if (i <= 0) {
+            i = 0;
+            direction = DOWNLEFT;
+        }
+        if (j < leftBorderOffset) {
+            j = leftBorderOffset;
+            direction = DOWNRIGHT;
+        }
+    } else if (direction == DOWNRIGHT) {
+        i++;
+        j++;
+        if (j >= keepout) {
+            if (i > bottomOffset) {
+                i = bottomOffset;
+                direction = UPRIGHT;
+            }
+        }
+        if (i >= (MAXROW / 2)) {
+            i = (MAXROW / 2) - 1;
+            direction = UPRIGHT;
+        }
+        if (j >= ((MAXCOL / 2) - 1 + leftBorderOffset)) {
+            j = (MAXCOL / 2) - 1 + leftBorderOffset;
+            direction = UPLEFT;
+        }
+    } else if (direction == DOWNLEFT) {
+        i++;
+        j--;
+        if (j < leftBorderOffset) {
+            j = leftBorderOffset;
+            direction = UP;
+        }
+        if (j >= keepout) {
+            if (i > bottomOffset) {
+                i = bottomOffset;
+                direction = UPLEFT;
+            }
+        }
+        if (i >= (MAXROW / 2)) {
+            i = (MAXROW / 2) - 1;
+            direction = UP;
+        }
+    }
+}
+
+void ConfigAd(void) {
+
+    mPORTBSetPinsAnalogIn(BIT_3);
+    mPORTBSetPinsAnalogIn(BIT_8);
+    mPORTBSetPinsAnalogIn(BIT_9);
+    mPORTBSetPinsAnalogIn(BIT_10);
+
+    // ---- configure and enable the ADC ----
+
+    // ensure the ADC is off before setting the configuration
+    CloseADC10();
+
+    // define setup parameters for OpenADC10
+    //                 Turn module on | ouput in integer | trigger mode auto | enable autosample
+#define PARAM1  ADC_MODULE_ON | ADC_FORMAT_INTG | ADC_CLK_AUTO | ADC_AUTO_SAMPLING_ON
+
+    // ADC ref external    | disable offset test    | enable scan mode | perform  samples | use dual buffers | use only mux A
+#define PARAM2  ADC_VREF_AVDD_AVSS | ADC_OFFSET_CAL_DISABLE | ADC_SCAN_ON | ADC_SAMPLES_PER_INT_4 | ADC_ALT_BUF_ON | ADC_ALT_INPUT_OFF
+
+    //                   use ADC internal clock | set sample time
+#define PARAM3  ADC_CONV_CLK_INTERNAL_RC | ADC_SAMPLE_TIME_31
+
+    //  set inputs to analog
+#define PARAM4    ENABLE_AN3_ANA | ENABLE_AN8_ANA| ENABLE_AN9_ANA | ENABLE_AN10_ANA
+
+    // only scan AN0 to AN2
+#define PARAM5   SKIP_SCAN_AN0 |SKIP_SCAN_AN1 |SKIP_SCAN_AN2 |SKIP_SCAN_AN4 |SKIP_SCAN_AN5 |SKIP_SCAN_AN6 |SKIP_SCAN_AN7 |\
+                      SKIP_SCAN_AN11 | SKIP_SCAN_AN12 |SKIP_SCAN_AN13 |SKIP_SCAN_AN14 |SKIP_SCAN_AN15
+
+    // set negative reference to Vref for Mux A
+    SetChanADC10(ADC_CH0_NEG_SAMPLEA_NVREF);
+
+    // open the ADC
+    OpenADC10(PARAM1, PARAM2, PARAM3, PARAM4, PARAM5);
+
+    // -- configure the ADC interrupt, priority level 2 --
+    ConfigIntADC10(ADC_INT_PRI_2 | ADC_INT_SUB_PRI_2 | ADC_INT_ON);
+
+    // clear the interrupt flag
+    mAD1ClearIntFlag();
+
+    // Enable the ADC
+    EnableADC10();
+
+}
+
+void __ISR(_ADC_VECTOR, ipl6) AdcHandler(void) {
+    unsigned short offSet;
+    unsigned char i;
+
+    // clear the interrupt flag
+    mAD1ClearIntFlag();
+
+    // determine which buffer is idle and create an offset
+    offSet = 8 * ((~ReadActiveBufferADC10() & 0x01));
+
+    for (i = 0; i < MAXPOTS; i++)
+        arrADdata[i] = (unsigned char) (ReadADC10(offSet + i) / 4); // read the result of channel 0 conversion from the idle buffer
+}
+
+
+#define XBEE_VECTOR _UART_4_VECTOR
+// XBEE interrupt handler it is set at priority level 2
+
+void __ISR(XBEE_VECTOR, ipl2) IntXbeeHandler(void) {
+    static unsigned char i = 0;
+    unsigned char ch = '\r';
+
+    if (INTGetFlag(INT_SOURCE_UART_RX(XBEEuart))) {
+        INTClearFlag(INT_SOURCE_UART_RX(XBEEuart));
+        if (UARTReceivedDataIsAvailable(XBEEuart)) {
+            ch = UARTGetDataByte(XBEEuart);
+            StoreXBEE(ch);
+        }
+    }
+
+    if (INTGetFlag(INT_SOURCE_UART_TX(XBEEuart))) {
+        INTClearFlag(INT_SOURCE_UART_TX(XBEEuart));
+
+        if (XBEEbusy) {
+            if (i < MAXBUFFER) ch = XBEETxBuffer[i++];
+            while (!UARTTransmitterIsReady(XBEEuart));
+            UARTSendDataByte(XBEEuart, ch);
+            if (ch == '\r') {
+                INTEnable(INT_SOURCE_UART_TX(XBEEuart), INT_DISABLED);
+                XBEEbusy = false;
+                i = 0;
+            }
+        } else INTEnable(INT_SOURCE_UART_TX(XBEEuart), INT_DISABLED);
+    }
+}
+
+#define RS485_VECTOR _UART_5_VECTOR
+// RS485 interrupt handler it is set at priority level 2
+
+void __ISR(RS485_VECTOR, ipl2) IntRS485Handler(void) {
+    static unsigned char i = 0;
+    unsigned char ch = '\r';
+
+    if (INTGetFlag(INT_SOURCE_UART_RX(RS485uart))) {
+        INTClearFlag(INT_SOURCE_UART_RX(RS485uart));
+        if (UARTReceivedDataIsAvailable(RS485uart)) {
+            ch = UARTGetDataByte(RS485uart);
+            StoreRS485(ch);
+        }
+    }
+
+    if (INTGetFlag(INT_SOURCE_UART_TX(RS485uart))) {
+        INTClearFlag(INT_SOURCE_UART_TX(RS485uart));
+
+        if (RS485busy) {
+            if (i < MAXBUFFER) ch = RS485TxBuffer[i++];
+            while (!UARTTransmitterIsReady(RS485uart));
+            UARTSendDataByte(RS485uart, ch);
+            if (ch == '\r') {
+                INTEnable(INT_SOURCE_UART_TX(RS485uart), INT_DISABLED);
+                RS485busy = false;
+                i = 0;
+                RS485timer = 200;
+            }
+        } else INTEnable(INT_SOURCE_UART_TX(RS485uart), INT_DISABLED);
+    }
+}
+
+void SendRS485packet(void) {
+    unsigned short i;
+    char ch;
+
+    for (i = 0; i < MAXBUFFER; i++) {
+        ch = RS485RxBuffer[i];
+        RS485TxBuffer[i] = ch;
+        if (ch == '\r')break;
+    }
+
+    RS485_CTRL = 1;
+    DelayMs(4);
+    RS485busy = TRUE;
+    INTEnable(INT_SOURCE_UART_TX(RS485uart), INT_ENABLED);
+    RS485full = FALSE;
+}
+
+void SendXBEEpacket(void) {
+    unsigned short i;
+    char ch;
+
+    for (i = 0; i < MAXBUFFER; i++) {
+        ch = XBEERxBuffer[i];
+        XBEETxBuffer[i] = ch;
+        if (ch == '\r')break;
+    }
+
+    XBEEbusy = TRUE;
+    INTEnable(INT_SOURCE_UART_TX(XBEEuart), INT_ENABLED);
+    XBEEfull = FALSE;
+}
+
+void __ISR(_TIMER_1_VECTOR, ipl2) Timer1Handler(void) {
+    static unsigned short line = 0;
+    static unsigned char PWMbit = 0, timerCounter = 0;
+    unsigned char updateFlag;
+    static unsigned char Longo = FALSE;
+
+    if (Longo) {
+        TEST_OUT = 1;
+        Longo = FALSE;
+    } else {
+        TEST_OUT = 0;
+        Longo = TRUE;
+    }
+
+    mT1ClearIntFlag(); // Clear interrupt flag
+
+    updateFlag = updatePWM[timerCounter];
+    if (updateFlag) {
+        updatePORTDData(line, PWMbit);
+        writeMatrix();
+
+        PWMbit++;
+        if (PWMbit >= RESOLUTION) {
+            PWMbit = 0;
+            line++;
+            if (line >= MAXLINE) {
+                line = 0;
+            }
+        }
+
+    }
+    timerCounter++;
+    if (timerCounter >= PWMSTEPS) {
+        timerCounter = 0;
+        PWMbit = 0;
+    }
+    if (RS485timer) {
+        RS485timer--;
+        if (!RS485timer)
+            RS485_CTRL = 0;
+    }
+}
+
+/*
+int fputc(int ch, FILE *ptr){
+    if (HOSTindex<MAXBUFFER-2){
+        HOSTTxBuffer[HOSTindex++]=ch;
+        INTEnable(INT_U2TX, INT_ENABLED);
+    }
+    return(0);
+ }
+ */
+
+#define HOST_VECTOR _UART_2_VECTOR
+// HOST UART interrupt handler it is set at priority level 2
+
+void __ISR(HOST_VECTOR, ipl2) IntHostUartHandler(void) {
+    static unsigned char i = 0;
+    unsigned char ch = '\r';
+
+    if (INTGetFlag(INT_SOURCE_UART_RX(HOSTuart))) {
+        INTClearFlag(INT_SOURCE_UART_RX(HOSTuart));
+        if (UARTReceivedDataIsAvailable(HOSTuart)) {
+            ch = UARTGetDataByte(HOSTuart);
+            StoreHOST(ch);
+        }
+    }
+
+    if (INTGetFlag(INT_SOURCE_UART_TX(HOSTuart))) {
+        INTClearFlag(INT_SOURCE_UART_TX(HOSTuart));
+        /*
+        if (HOSTindex) {
+                if (i < HOSTindex){
+                    ch = HOSTTxBuffer[i++];
+                    while (!UARTTransmitterIsReady(HOSTuart));
+                    UARTSendDataByte(HOSTuart, ch);
+                }
+                else {
+                    i=0;
+                    HOSTindex=0;
+                    INTEnable(INT_SOURCE_UART_TX(HOSTuart), INT_DISABLED);
+                }
+        } else INTEnable(INT_SOURCE_UART_TX(HOSTuart), INT_DISABLED);
+         */
+    }
+}
+
+// This routine initiates I2C reads and writes
+// It sends a START, then the DEVICE address,
+// then the first REGISTER to read or write.
+
+unsigned char sendREADcommand(unsigned char deviceID) {
+    unsigned char startCounter = 100;
+
+    while (startCounter--) {
+        if (StartTransfer(TRUE))break;
+        DelayMs(10);
+    }
+
+    if (!startCounter)return (FALSE);
+
+
+    // Write device ID
+    if (!TransmitOneByte((deviceID << 1) | I2C_READ))return (FALSE);
+
+    // Verify that the byte was acknowledged
+    if (!I2CByteWasAcknowledged(EEPROM_I2C_BUS))return (FALSE);
+
+    return (TRUE);
+
+}
+
+unsigned char setRegister(unsigned char deviceID, unsigned char deviceREGISTER) {
+    unsigned char startCounter = 100;
+
+    while (startCounter--) {
+        if (StartTransfer(FALSE))break;
+        DelayMs(10);
+    }
+
+    if (!startCounter) {
+        DelayMs(200);
+        I2CStop(EEPROM_I2C_BUS);
+        return (FALSE);
+    }
+
+    // Write device ID
+    if (!TransmitOneByte((deviceID << 1) | I2C_WRITE))return (FALSE);
+
+    // Verify that the byte was acknowledged
+    if (!I2CByteWasAcknowledged(EEPROM_I2C_BUS))return (FALSE);
+
+    // Write first register to be addressed
+    if (!TransmitOneByte(deviceREGISTER))return (FALSE);
+
+
+    // Verify that the byte was acknowledged
+    if (!I2CByteWasAcknowledged(EEPROM_I2C_BUS))return (FALSE);
+
+    return (TRUE);
+
+}
+
+unsigned char writeByteToRegister(unsigned char deviceID, unsigned char deviceREGISTER, unsigned char dataByte) {
+    unsigned char startCounter = 100;
+
+
+    // I2C START BIT
+    while (startCounter--) {
+        if (StartTransfer(FALSE))break;
+        DelayMs(10);
+    }
+
+    if (!startCounter)return (FALSE);
+
+
+    // Write device ID
+    if (!TransmitOneByte((deviceID << 1) | I2C_WRITE))return (FALSE);
+
+    // Verify that the byte was acknowledged
+    if (!I2CByteWasAcknowledged(EEPROM_I2C_BUS))return (FALSE);
+
+    // Write first register to be addressed
+    if (!TransmitOneByte(deviceREGISTER))return (FALSE);
+
+    // Verify that the byte was acknowledged
+    if (!I2CByteWasAcknowledged(EEPROM_I2C_BUS))return (FALSE);
+
+    // Write data byte
+    if (!TransmitOneByte(dataByte))return (FALSE);
+
+    // Verify that the byte was acknowledged
+    if (!I2CByteWasAcknowledged(EEPROM_I2C_BUS))return (FALSE);
+
+    // End of I2C transaction
+    I2CStop(EEPROM_I2C_BUS);
+
+    return (TRUE);
+
+}
+
+unsigned char readRegisters(unsigned char deviceID, unsigned char deviceREGISTER, unsigned char numRegisters, unsigned char *registerPtr) {
+    unsigned char i;
+
+    if (numRegisters >= MAXBUFFER)return (0);
+    if (registerPtr == NULL)return (0);
+
+    if (!setRegister(deviceID, deviceREGISTER)) return (FALSE);
+    if (!sendREADcommand(deviceID)) return (FALSE);
+
+    for (i = 0; i < NUMBYTES; i++) {
+        if (I2CReceiverEnable(EEPROM_I2C_BUS, TRUE) == I2C_RECEIVE_OVERFLOW) // Enable the module to receive data from the I2C bus.
+            return (0);
+        else {
+            short timeout = 1000;
+            while (!I2CReceivedDataIsAvailable(EEPROM_I2C_BUS)) { // Wait for data from slave
+                timeout--;
+                if (!timeout) return (0);
+                DelayMs(1);
+            }
+
+            if (i < (NUMBYTES - 1)) I2CAcknowledgeByte(EEPROM_I2C_BUS, TRUE); // Set ACK or NAK flag appropriately
+            else I2CAcknowledgeByte(EEPROM_I2C_BUS, FALSE);
+            registerPtr[i] = I2CGetByte(EEPROM_I2C_BUS); // Read a byte from slave
+
+            timeout = 1000;
+            while (!I2CAcknowledgeHasCompleted(EEPROM_I2C_BUS)) { // Wait for acknowledge bit to be sent
+                timeout--;
+                if (!timeout) return (0);
+                DelayMs(1);
+            }
+        }
+    }
+
+    I2CStop(EEPROM_I2C_BUS);
+
+    return (i);
+}
+
+unsigned char initMMA8452(void) {
+    unsigned char accelData[4] = {0, 0, 0, 0};
+    unsigned char commandByte;
+
+    DelayMs(10);
+
+    if (!readRegisters(ACCELEROMETER_ID, WHO_AM_I, 1, accelData)) return (FALSE); // Read WHO_AM_I register
+    if (accelData[0] != 0x2A) return (FALSE); // WHO_AM_I should always be 0x2A
+    DelayMs(10);
+
+    if (!readRegisters(ACCELEROMETER_ID, CTRL_REG1, 1, accelData)) return (FALSE); // Put in STANDBY mode    
+    commandByte = accelData[0];
+    commandByte = commandByte & 0xFE;
+    DelayMs(10);
+    if (!writeByteToRegister(ACCELEROMETER_ID, CTRL_REG1, commandByte)) return (FALSE);
+
+    commandByte = GSCALE;
+    if (commandByte > 8) commandByte = 8;
+    commandByte = commandByte >> 2;
+    DelayMs(10);
+    if (!writeByteToRegister(ACCELEROMETER_ID, XYZ_DATA_CFG, commandByte)) return (FALSE);
+
+
+    DelayMs(10);
+    if (!readRegisters(ACCELEROMETER_ID, CTRL_REG1, 1, accelData)) return (FALSE); // Put in ACTIVE mode
+    commandByte = accelData[0];
+    commandByte = commandByte | 0x01;
+
+    DelayMs(10);
+    if (!writeByteToRegister(ACCELEROMETER_ID, CTRL_REG1, commandByte)) return (FALSE);
+    printf("\r\r>SUCCESS! MMA8452 INITIALIZED: %X", commandByte);
+
+    return (TRUE);
+}
+
+/*
+void readAccelData(int *destination)
+{
+  byte rawData[6];  // x/y/z accel register data stored here
+
+  readRegisters(OUT_X_MSB, 6, rawData);  // Read the six raw data registers into data array
+
+  // Loop to calculate 12-bit ADC and g value for each axis
+  for(int i = 0; i < 3 ; i++)
+  {
+    int gCount = (rawData[i*2] << 8) | rawData[(i*2)+1];  //Combine the two 8 bit registers into one 12-bit number
+    gCount >>= 4; //The registers are left align, here we right align the 12-bit integer
+
+    // If the number is negative, we have to make it so manually (no 12-bit data type)
+    if (rawData[i*2] > 0x7F)
+    {  
+      gCount = ~gCount + 1;
+      gCount *= -1;  // Transform into negative 2's complement #
+    }
+
+    destination[i] = gCount; //Record this gCount into the 3 int array
+  }
+}
+ */
+
+short convertValue(unsigned char MSBbyte, unsigned char LSBbyte) {
+    short value;
+
+    // Combine high and low bytes
+    value = MSBbyte;
+    value = value << 8;
+    value = value | LSBbyte;
+
+    //The registers are left align, here we right align the 12-bit integer
+    value = value >> 4;
+
+    // If the number is negative, we have to make it so manually (no 12-bit data type)
+    if ((MSBbyte & 0x80)!=0) {
+        value = ~value + 1;
+        value = value * -1;  // Transform into negative 2's complement #
+    }
+    return (value);
+}
