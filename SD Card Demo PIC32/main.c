@@ -1,8 +1,8 @@
-/* SDCardDemo for PIC 32MX795F512L 
+/* SDCardDemo for PIC 32MX795F512L and 32MX440F256H microcontrollers
  * NO USB Version
  * 
- * Compiled for PIC32MX795F512L using XC32 V1.30 compiler
- * MPLABX Version 4.10
+ * Compiled for PIC32MX795F512L and 32MX440F256H using XC32 V1.30 compiler
+ * MPLABX Version 6.00
  *  
  * 08-05-18 JBS: Adapted from SD Pots project. Updated Defs.h to work for SNAD PIC or UBW32 boards.
  * 08-06-21 JBS: Works on Rev 2 Brain Board
